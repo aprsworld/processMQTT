@@ -27,7 +27,6 @@
 
 static int mqtt_port=1883;
 static char mqtt_host[256];
-static char mqtt_topic[256];
 static struct mosquitto *mosq;
 
 static void _mosquitto_shutdown(void);
@@ -40,6 +39,10 @@ extern int optind, opterr, optopt;
 int outputDebug=0;
 int milliseconds_timeout=500;
 int alarmSeconds=5;
+
+static char *incomingTopic;
+static char *outgoingTopic;
+static char *command;
 
 typedef struct {
 	char *label;
@@ -87,6 +90,20 @@ static void signal_handler(int signum) {
 }
 #include <sys/time.h>
 
+void message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_message *message) {
+	char data[4];
+
+	/* cancel pending alarm */
+	alarm(0);
+	/* set an alarm to send a SIGALARM if data not received within alarmSeconds */
+ 	alarm(ALARM_SECONDS);
+
+
+	if ( outputDebug )
+		fprintf(stderr,"got message '%.*s' for topic '%s'\n", message->payloadlen, (char*) message->payload, message->topic);
+
+	/* write to the pipe the full packet */
+}
 
 
 
@@ -116,10 +133,11 @@ static struct mosquitto *_mosquitto_startup(void) {
 
 	if (mosq) {
 		mosquitto_connect_callback_set(mosq, connect_callback);
-//		mosquitto_message_callback_set(mosq, message_callback);
+		mosquitto_message_callback_set(mosq, message_callback);
 
 		fprintf(stderr,"# connecting to MQTT server %s:%d\n",mqtt_host,mqtt_port);
 		rc = mosquitto_connect(mosq, mqtt_host, mqtt_port, 60);
+		mosquitto_subscribe(mosq, NULL, incomingTopic, 0);
 		// if ( 0 != rc )	what do I do?
 
 		/* start mosquitto network handling loop */
@@ -145,7 +163,8 @@ if ( mosq ) {
 fprintf(stderr,"# mosquitto_lib_cleanup()\n");
 mosquitto_lib_cleanup();
 }
-int serToMQTT_pub(const char *message ) {
+#if 0
+static int serToMQTT_pub(const char *message ) {
 	int rc = 0;
 
 	static int messageID;
@@ -177,13 +196,49 @@ int serToMQTT_pub(const char *message ) {
 
 return	rc;
 }
+#endif
+static void process_topics(char *s ) {
+/*  s will have the format  incomingTopic:outgoingTopic:command   */
+	char	buffer[512];
+	char	*p,*q;
+
+	strncpy(buffer,s,sizeof(buffer));
+	q = buffer;
+	p = strsep(&q,":");
+	if ( 0 == p ) {
+		fprintf(stderr,"# -t expects incomingTopic:outgoingTopic:command\n");
+		exit (1);
+	}
+/* p now point to incomingTopic */
+
+	incomingTopic = strsave(p);
+
+	p = strsep(&q,":");
+	if ( 0 == p ) {
+		fprintf(stderr,"# -t expects incomingTopic:outgoingTopic:command\n");
+		exit (1);
+	}
+
+	outgoingTopic = strsave(p);
+	
+	if ( 0 == q ) {
+		fprintf(stderr,"# -t expects incomingTopic:outgoingTopic:command\n");
+		exit (1);
+	}
+
+	command = strsave(q);
+
+}
 
 int main(int argc, char **argv) {
 	int n;
 
 	/* command line arguments */
-	while ((n = getopt (argc, argv, "a:b:hi:s:vt:m:M:H:P:T:")) != -1) {
+	while ((n = getopt (argc, argv, "t:H:p:vnh")) != -1) {
 		switch (n) {
+			case 't':
+				process_topics(optarg);
+				break;
 			case 'H':	
 				strncpy(mqtt_host,optarg,sizeof(mqtt_host));
 				break;
@@ -201,14 +256,19 @@ int main(int argc, char **argv) {
 				fprintf(stdout,"#\n");
 				fprintf(stdout,"# -h\t\tThis help message then exit\n");
 				fprintf(stdout,"#\n");
-				exit(0);
+				return(0);
 		}
 	}
-	if ( ' ' >= mqtt_host[0] ) { fputs("# <-h mqtt_host>	\n",stderr); exit(1); } else fprintf(stderr,"# mqtt_host=%s\n",mqtt_host);
-	if ( ' ' >= mqtt_topic[0] ) { fputs("# <-t mqtt_topic>	\n",stderr); exit(1); } else fprintf(stderr,"# mqtt_topic=%s\n",mqtt_topic);
+	if ( ' ' >= mqtt_host[0] ) { fputs("# <-H mqtt_host>	\n",stderr); return(1); } else fprintf(stderr,"# mqtt_host=%s\n",mqtt_host);
 
-if ( 0 == _mosquitto_startup() )
-	return	1;
+	if ( 0 == incomingTopic || 0 == outgoingTopic || 0 == command ) {
+		fprintf(stderr,"# -t is missing and is required.\n");
+		fprintf(stderr,"# -t expects incomingTopic:outgoingTopic:command\n");
+		return	1;
+	}
+
+	if ( 0 == _mosquitto_startup() )
+		return	1;
 
 
 	/* install signal handler */
@@ -218,5 +278,5 @@ if ( 0 == _mosquitto_startup() )
 
 	_mosquitto_shutdown();
 
-	exit(0);
+	return(0);
 }
