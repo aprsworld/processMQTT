@@ -14,16 +14,18 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
-#include <string.h>
 #include <getopt.h>
 #include <netinet/in.h>
 #include <netdb.h> 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <string.h>
 #include <json.h>
 #include <mosquitto.h>
+#include <sys/wait.h>
+
+static int ALARM_SECONDS = 600;
+// static int pfp[2];
 
 static int mqtt_port=1883;
 static char mqtt_host[256];
@@ -54,6 +56,47 @@ uint64_t microtime() {
 	gettimeofday(&time, NULL); 
 	return ((uint64_t)time.tv_sec * 1000000) + time.tv_usec;
 }
+
+int  RunFilter(void *d, char *cmd, void *packet,int packetLen) {
+	char	buffer[1024];
+	char	temp_name[64] = {};
+	int	rd;
+	FILE	*in,*out;
+
+	umask(00);
+	snprintf(temp_name,sizeof(temp_name),"/tmp/processMQTT_fifo_%d",getpid());
+	snprintf(buffer,sizeof(buffer),"%s > %s",cmd,temp_name);
+	out = popen(buffer,"w");
+	if ( 0 == out ) {
+		fprintf(stderr,"# unable to popen(%s,\"w\").  %s\n",temp_name,strerror(errno));
+		return	1;
+	}
+	if ( packetLen != fwrite(packet,1,packetLen,out) ) {
+		fprintf(stderr,"# unable to fwrite %s.  %s\n",temp_name,strerror(errno));
+	return	1;
+	}
+	pclose(out);
+	in = fopen(temp_name,"r");
+	if ( 0 == in ) {
+		fprintf(stderr,"# unable to fopen(%s,\"r\").  %s\n",temp_name,strerror(errno));
+		return	1;
+	}
+	rd = fread(buffer,1,sizeof(buffer),in);
+	if ( 0 >= rd ) {
+		fprintf(stderr,"# unable to fread %s.  %s\n",temp_name,strerror(errno));
+		return	1;
+	}
+	fclose(in);
+	memcpy(d,buffer,rd);
+	unlink(temp_name);
+	return	0;
+}
+
+
+	
+		
+
+
 
 void connect_callback(struct mosquitto *mosq, void *obj, int result) {
 	printf("# connect_callback, rc=%d\n", result);
@@ -91,7 +134,10 @@ static void signal_handler(int signum) {
 #include <sys/time.h>
 
 void message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_message *message) {
-	char data[4];
+	char	outBuffer[1024] = {};
+	int rc = 0;
+
+	static int messageID;
 
 	/* cancel pending alarm */
 	alarm(0);
@@ -103,75 +149,16 @@ void message_callback(struct mosquitto *mosq, void *obj, const struct mosquitto_
 		fprintf(stderr,"got message '%.*s' for topic '%s'\n", message->payloadlen, (char*) message->payload, message->topic);
 
 	/* write to the pipe the full packet */
-}
-
-
-
-char	*strsave(char *s )
-{
-char	*ret_val = 0;
-
-ret_val = malloc(strlen(s)+1);
-if ( 0 != ret_val) strcpy(ret_val,s);
-return ret_val;	
-}
-	
-static struct mosquitto *_mosquitto_startup(void) {
-	char clientid[24];
-	int rc = 0;
-
-
-	fprintf(stderr,"# mqtt-send-example start-up\n");
-
-
-	fprintf(stderr,"# initializing mosquitto MQTT library\n");
-	mosquitto_lib_init();
-
-	memset(clientid, 0, 24);
-	snprintf(clientid, 23, "mqtt-send-example_%d", getpid());
-	mosq = mosquitto_new(clientid, true, 0);
-
-	if (mosq) {
-		mosquitto_connect_callback_set(mosq, connect_callback);
-		mosquitto_message_callback_set(mosq, message_callback);
-
-		fprintf(stderr,"# connecting to MQTT server %s:%d\n",mqtt_host,mqtt_port);
-		rc = mosquitto_connect(mosq, mqtt_host, mqtt_port, 60);
-		mosquitto_subscribe(mosq, NULL, incomingTopic, 0);
-		// if ( 0 != rc )	what do I do?
-
-		/* start mosquitto network handling loop */
-		mosquitto_loop_start(mosq);
-		}
-
-return	mosq;
-}
-
-static void _mosquitto_shutdown(void) {
-
-if ( mosq ) {
-	
-	/* disconnect mosquitto so we can be done */
-	mosquitto_disconnect(mosq);
-	/* stop mosquitto network handling loop */
-	mosquitto_loop_stop(mosq,0);
-
-
-	mosquitto_destroy(mosq);
+	if ( 0 != RunFilter(outBuffer, command, message->payload,message->payloadlen) ) {
+		fprintf(stderr,"# problem piping.  %s\n",strerror(errno));
+		exit(1);
 	}
-
-fprintf(stderr,"# mosquitto_lib_cleanup()\n");
-mosquitto_lib_cleanup();
-}
-#if 0
-static int serToMQTT_pub(const char *message ) {
-	int rc = 0;
-
-	static int messageID;
+	/* now publish the message to mqtt */
+	// fprintf(stderr,"# publish packet '%s'\n",outBuffer);
 	/* instance, message ID pointer, topic, data length, data, qos, retain */
-	rc = mosquitto_publish(mosq, &messageID, mqtt_topic, strlen(message), message, 0, 0); 
+	rc = mosquitto_publish(mosq, &messageID, outgoingTopic, strlen(outBuffer), outBuffer, 0, 0); 
 
-	if (0 != outputDebug) fprintf(stderr,"# mosquitto_publish provided messageID=%d and return code=%d\n",messageID,rc);
+	/*if (0 != outputDebug)*/ fprintf(stderr,"# mosquitto_publish provided messageID=%d and return code=%d\n",messageID,rc);
 
 	/* check return status of mosquitto_publish */ 
 	/* this really just checks if mosquitto library accepted the message. Not that it was actually send on the network */
@@ -194,9 +181,78 @@ static int serToMQTT_pub(const char *message ) {
 	}
 
 
-return	rc;
+// return	rc;
 }
-#endif
+
+
+
+char	*strsave(char *s )
+{
+char	*ret_val = 0;
+
+ret_val = malloc(strlen(s)+1);
+if ( 0 != ret_val) strcpy(ret_val,s);
+return ret_val;	
+}
+	
+static int run = 1;
+static int _mosquitto_startup(void) {
+	char clientid[24];
+	int rc = 0;
+
+
+	fprintf(stderr,"# mqtt-send-example start-up\n");
+
+
+	fprintf(stderr,"# initializing mosquitto MQTT library\n");
+	mosquitto_lib_init();
+
+	memset(clientid, 0, 24);
+	snprintf(clientid, 23, "mqtt-send-example_%d", getpid());
+	mosq = mosquitto_new(clientid, true, 0);
+
+	if (mosq) {
+		mosquitto_connect_callback_set(mosq, connect_callback);
+		mosquitto_message_callback_set(mosq, message_callback);
+
+		fprintf(stderr,"# connecting to MQTT server %s:%d\n",mqtt_host,mqtt_port);
+		rc = mosquitto_connect(mosq, mqtt_host, mqtt_port, 60);
+		mosquitto_subscribe(mosq, NULL, incomingTopic, 0);
+
+		while (run) {
+			rc = mosquitto_loop(mosq, -1, 1);
+
+			if ( run && rc ) {
+				printf("connection error!\n");
+				sleep(10);
+				mosquitto_reconnect(mosq);
+			}
+		}
+		mosquitto_destroy(mosq);
+	}
+
+	fprintf(stderr,"# mosquitto_lib_cleanup()\n");
+	mosquitto_lib_cleanup();
+
+	return rc;
+}
+
+static void _mosquitto_shutdown(void) {
+
+if ( mosq ) {
+	
+	/* disconnect mosquitto so we can be done */
+	mosquitto_disconnect(mosq);
+	/* stop mosquitto network handling loop */
+	mosquitto_loop_stop(mosq,0);
+
+
+	mosquitto_destroy(mosq);
+	}
+
+fprintf(stderr,"# mosquitto_lib_cleanup()\n");
+mosquitto_lib_cleanup();
+}
 static void process_topics(char *s ) {
 /*  s will have the format  incomingTopic:outgoingTopic:command   */
 	char	buffer[512];
@@ -250,7 +306,8 @@ int main(int argc, char **argv) {
 				fprintf(stderr,"# verbose (debugging) output to stderr enabled\n");
 				break;
 			case 'h':
-				fprintf(stdout,"# -h\t\tmqtt host\n");
+				fprintf(stdout,"# -t\t\tincomingTopic:outgoingTopic:transformationalCommand\n");
+				fprintf(stdout,"# -H\t\tmqtt host\n");
 				fprintf(stdout,"# -p\t\tmqtt port\n");
 				fprintf(stdout,"# -v\t\tOutput verbose / debugging to stderr\n");
 				fprintf(stdout,"#\n");
@@ -266,17 +323,13 @@ int main(int argc, char **argv) {
 		fprintf(stderr,"# -t expects incomingTopic:outgoingTopic:command\n");
 		return	1;
 	}
-
-	if ( 0 == _mosquitto_startup() )
-		return	1;
-
-
 	/* install signal handler */
 	signal(SIGALRM, signal_handler); /* timeout */
 	signal(SIGUSR1, signal_handler); /* user signal to do data block debug dump */
 	signal(SIGPIPE, signal_handler); /* broken TCP connection */
 
-	_mosquitto_shutdown();
+	if ( 0 != _mosquitto_startup() )
+		return	1;
 
 	return(0);
 }
