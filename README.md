@@ -22,16 +22,16 @@ an outoging topic.
 
 ## Example 
 
-`./processMQTT  -H localhost -t  'toStation/A2744:left/right:tr [a-z] [A-Z]'`
+`./processMQTT  --mqtt-host localhost --mqtt-topic  'toStation/A2744:left/right:tr [a-z] [A-Z]'`
 
 
 ## Command line switches
 
 switch|Required/Optional|argument|description
 ---|---|---|---
--H|REQUIRED|qualified host|mqtt host operating mqtt server
--t|REQUIRED|topic|incomingTopic:outgoingTopic:transofrmationalCommand
--v|OPTIONAL|(none)|sets verbose mode
--p|OPTIONAL|number|default is 1883
--h|OPTIONAL|(none)|displays help and exits
+--mqtt-host|REQUIRED|qualified host|mqtt host operating mqtt server
+--mqtt-topic|REQUIRED|topic|incomingTopic:outgoingTopic:transofrmationalCommand
+--verbose|OPTIONAL|(none)|sets verbose mode
+--mqtt-port|OPTIONAL|number|default is 1883
+--help|OPTIONAL|(none)|displays help and exits
 
